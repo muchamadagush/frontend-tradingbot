@@ -60,7 +60,7 @@ function App() {
   // --- WEBSOCKET MESSAGE HANDLER ---
   const handleWsMessage = useCallback((message) => {
     const { type, data } = message
-    
+
     switch (type) {
       case 'connected':
         setServerStatus("Connected (WS)")
@@ -72,7 +72,7 @@ function App() {
           }))
         }
         break
-        
+
       case 'bot_status':
         setBotStatus(data)
         // Update active symbol from activity
@@ -83,7 +83,7 @@ function App() {
           }
         }
         break
-        
+
       case 'trade_update':
         // Add or update trade in history
         setHistory(prev => {
@@ -94,28 +94,28 @@ function App() {
           return [{ ...data, source: 'Hunter' }, ...prev].slice(0, 50)
         })
         break
-        
+
       case 'system_log':
         setSystemLogs(prev => [data.message, ...prev].slice(0, 50))
         break
-        
+
       case 'balance_update':
         setBalances(data)
         break
-        
+
       case 'solana_status':
         setSolanaAutoStatus(data)
         if (data.strategy && data.is_running) {
           setSolanaStrategy(data.strategy)
         }
         break
-        
+
       case 'price_update':
         if (data.symbol === activeSymbol) {
           setMarketData(prev => ({ ...prev, ...data }))
         }
         break
-        
+
       default:
         break
     }
@@ -225,10 +225,10 @@ function App() {
         setSwapQuote(null)
       }
       setTimeout(fetchData, 4000)
-    } catch (e) { 
-      alert("Gagal Swap: " + (e.response?.data?.error || e.message)) 
-    } finally { 
-      setIsSwapping(false) 
+    } catch (e) {
+      alert("Gagal Swap: " + (e.response?.data?.error || e.message))
+    } finally {
+      setIsSwapping(false)
     }
   }
 
@@ -251,7 +251,7 @@ function App() {
       }
     }
     checkAuth()
-    
+
     const handleAuthExpired = () => {
       setAuthRequired(true)
       setAuthError('Session expired. Please login again.')
@@ -307,11 +307,11 @@ function App() {
       // Solana balances
       const resBal = await axios.get(`${VITE_API_URL}/api/solana/balance`)
       setBalances(resBal.data)
-      
+
       // Market price
       const resPrice = await axios.get(`${VITE_API_URL}/api/toko/price/${activeSymbol}`)
       setMarketData(resPrice.data)
-      
+
       // Solana auto status
       const resAuto = await axios.get(`${VITE_API_URL}/api/solana/auto/status`)
       setSolanaAutoStatus(resAuto.data)
@@ -342,15 +342,15 @@ function App() {
   // Login form if auth required
   if (authRequired) {
     return (
-      <div style={{ 
-        padding: '20px', fontFamily: 'Arial', maxWidth: '400px', margin: '100px auto', 
+      <div style={{
+        padding: '20px', fontFamily: 'Arial', maxWidth: '400px', margin: '100px auto',
         color: '#ecf0f1', backgroundColor: '#2c3e50', borderRadius: '10px'
       }}>
         <div style={{ textAlign: 'center', marginBottom: '30px' }}>
           <h1>🦅 Crypto Hybrid Bot</h1>
           <p style={{ color: '#bdc3c7' }}>Authentication Required</p>
         </div>
-        
+
         <div style={{ marginBottom: '20px' }}>
           <label style={{ display: 'block', marginBottom: '8px', color: '#bdc3c7' }}>API Key</label>
           <input
@@ -365,11 +365,11 @@ function App() {
             }}
           />
         </div>
-        
+
         {authError && (
           <p style={{ color: '#e74c3c', marginBottom: '15px', fontSize: '14px' }}>{authError}</p>
         )}
-        
+
         <button
           onClick={handleLogin}
           style={{
@@ -380,9 +380,9 @@ function App() {
         >
           🔓 Login
         </button>
-        
+
         <p style={{ marginTop: '20px', fontSize: '12px', color: '#7f8c8d', textAlign: 'center' }}>
-          Set BOT_API_KEY in .env or API_KEYS for multiple keys.<br/>
+          Set BOT_API_KEY in .env or API_KEYS for multiple keys.<br />
           Set AUTH_MODE=disabled to skip authentication.
         </p>
       </div>
@@ -575,7 +575,7 @@ function App() {
             </div>
             {marketData ? (
               <div style={{ textAlign: 'center' }}>
-                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${(marketData.price ? parseFloat(marketData.price) : 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})}</h1>
+                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${(marketData.price ? parseFloat(marketData.price) : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</h1>
               </div>
             ) : <p style={{ textAlign: 'center', color: '#7f8c8d' }}>Scanner Idle...</p>}
           </div>
@@ -624,7 +624,15 @@ function App() {
                     <td><span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', color: 'white', background: trade.source === 'Jupiter' ? 'linear-gradient(135deg, #8e44ad, #c0392b)' : '#2980b9' }}>{trade.source}</span></td>
                     <td style={{ fontWeight: 'bold' }}>{trade.symbol}</td>
                     <td style={{ fontWeight: 'bold', color: trade.side === 'BUY' ? '#27ae60' : '#c0392b' }}>{trade.side}</td>
-                    <td>{trade.source === 'Jupiter' ? `${trade.amount_out} ${trade.symbol.split('/')[0]}` : `$${trade.buy_price?.toFixed(2)}`}</td>
+                    <td>
+                      {trade.source === 'Jupiter' ? (
+                        trade.side === 'BUY'
+                          ? `${Number(trade.amount_out).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${trade.symbol.split('/')[0]} (dari ${Number(trade.amount_in).toFixed(4)} SOL)`
+                          : `${Number(trade.amount_out).toFixed(4)} SOL (dari ${Number(trade.amount_in).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${trade.symbol.split('/')[0]})`
+                      ) : (
+                        `$${trade.buy_price?.toFixed(2)}`
+                      )}
+                    </td>
                     <td style={{ fontSize: '11px', color: '#95a5a6' }}>{trade.source === 'Jupiter' ? (trade.txid === 'UNKNOWN' ? '-' : <a href={`https://solscan.io/tx/${trade.txid}`} target="_blank" style={{ color: '#3498db' }}>View TX</a>) : (trade.profit_usdt ? `$${trade.profit_usdt}` : '-')}</td>
                   </tr>
                 ))}
