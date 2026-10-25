@@ -15,9 +15,8 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 
-const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
-// Custom CSS untuk Date Input styling
 const dateInputStyles = `
   .analytics-date-input {
     width: 150px;
@@ -33,18 +32,13 @@ const dateInputStyles = `
     cursor: pointer !important;
     pointer-events: auto !important;
   }
-  
+
   .analytics-date-input:focus {
     outline: none !important;
     border-color: #3b82f6 !important;
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
   }
-  
-  .analytics-date-input::placeholder {
-    color: #9ca3af !important;
-  }
-  
-  /* Ensure date picker icon is visible */
+
   .analytics-date-input::-webkit-calendar-picker-indicator {
     cursor: pointer !important;
     color: #6b7280 !important;
@@ -52,11 +46,17 @@ const dateInputStyles = `
   }
 `;
 
+const formatIdr = (val) => {
+  const num = Number(val || 0);
+  const sign = num >= 0 ? '+' : '-';
+  return `${sign}Rp ${Math.abs(Math.round(num)).toLocaleString('id-ID')}`;
+};
+
 const AnalyticsTab = () => {
-  // =========================================
-  // STATE MANAGEMENT
-  // =========================================
-  const [activeTab, setActiveTab] = useState('solana'); // 'solana' or 'tokocrypto'
+  // 'combined' (Keseluruhan), 'tokocrypto' (Hunter CEX), or 'solana' (DEX)
+  const [activeTab, setActiveTab] = useState('combined');
+  // Sub-filter for Solana: 'ALL' | 'TRADER' | 'SNIPER'
+  const [solanaStrategyFilter, setSolanaStrategyFilter] = useState('ALL');
   const [startDate, setStartDate] = useState(null);
   const [endDate, setEndDate] = useState(null);
   const [timeframe, setTimeframe] = useState('daily');
@@ -64,113 +64,121 @@ const AnalyticsTab = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // Inject custom CSS saat component mount
-  React.useEffect(() => {
+  useEffect(() => {
     const style = document.createElement('style');
     style.innerHTML = dateInputStyles;
     document.head.appendChild(style);
     return () => document.head.removeChild(style);
   }, []);
 
-  // =========================================
-  // API CALL FUNCTION
-  // =========================================
-  const fetchAnalytics = async (tab, start, end, tf) => {
+  const fetchAnalytics = async (tab, start, end, tf, solStrat = 'ALL') => {
     setLoading(true);
     setError(null);
     try {
-      // Build URL dengan query parameters
-      const endpoint = tab === 'solana' 
-        ? `${VITE_API_URL}/api/analytics/solana`
-        : `${VITE_API_URL}/api/analytics/tokocrypto`;
+      let endpoint = `${VITE_API_URL}/api/analytics/combined`;
+      if (tab === 'solana') {
+        endpoint = `${VITE_API_URL}/api/analytics/solana`;
+      } else if (tab === 'tokocrypto') {
+        endpoint = `${VITE_API_URL}/api/analytics/tokocrypto`;
+      }
 
       const params = new URLSearchParams();
-      if (start) {
-        params.append('start_date', start);
-      }
-      if (end) {
-        params.append('end_date', end);
-      }
+      if (start) params.append('start_date', start);
+      if (end) params.append('end_date', end);
       params.append('timeframe', tf);
+      if (tab === 'solana') {
+        params.append('strategy', solStrat);
+      }
 
       const response = await axios.get(`${endpoint}?${params.toString()}`);
       setAnalyticsData(response.data);
     } catch (err) {
-      setError(`Gagal load analytics: ${err.message}`);
+      setError(`Gagal memuat data analytics: ${err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
     }
   };
 
-  // =========================================
-  // EFFECT: Fetch data saat tab atau filter berubah
-  // =========================================
   useEffect(() => {
-    fetchAnalytics(activeTab, startDate, endDate, timeframe);
-  }, [activeTab, timeframe]);
+    fetchAnalytics(activeTab, startDate, endDate, timeframe, solanaStrategyFilter);
+  }, [activeTab, timeframe, solanaStrategyFilter]);
 
-  // =========================================
-  // HANDLER: Apply date filter
-  // =========================================
   const handleApplyDateFilter = () => {
-    fetchAnalytics(activeTab, startDate, endDate, timeframe);
+    fetchAnalytics(activeTab, startDate, endDate, timeframe, solanaStrategyFilter);
   };
 
-  // Handler: Reset filters
   const handleResetFilters = () => {
     setStartDate(null);
     setEndDate(null);
     setTimeframe('daily');
+    setSolanaStrategyFilter('ALL');
+    fetchAnalytics(activeTab, null, null, 'daily', 'ALL');
   };
 
-  // =========================================
-  // HELPER: Format currency
-  // =========================================
-  const formatCurrency = (value, isSol = false) => {
-    if (isSol) {
-      return `${value.toFixed(8)} SOL`;
-    }
-    return `$${value.toFixed(2)}`;
-  };
+  const getColorByValue = (value) => (Number(value || 0) >= 0 ? '#10b981' : '#ef4444');
 
-  // =========================================
-  // HELPER: Get color based on value
-  // =========================================
-  const getColorByValue = (value) => {
-    return value >= 0 ? '#10b981' : '#ef4444'; // green if positive, red if negative
-  };
-
-  // =========================================
-  // UI: RENDERING
-  // =========================================
+  const summary = analyticsData?.summary || {};
+  const breakdown = analyticsData?.breakdown || {};
+  const chartData = analyticsData?.data || [];
 
   return (
     <div style={styles.container}>
-      {/* ===== HEADER ===== */}
-      <h1 style={styles.title}>📊 Analytics Dashboard</h1>
+      <h1 style={styles.title}>📊 Analytics Dashboard (Keseluruhan & Per Jenis Bot)</h1>
 
-      {/* ===== TAB SWITCHER ===== */}
+      {/* ===== MAIN PORTFOLIO TAB SWITCHER ===== */}
       <div style={styles.tabSwitcher}>
         <button
           style={{
             ...styles.tabButton,
-            ...(activeTab === 'solana' ? styles.tabButtonActive : {}),
+            ...(activeTab === 'combined' ? styles.tabButtonActiveCombined : {}),
           }}
-          onClick={() => setActiveTab('solana')}
+          onClick={() => setActiveTab('combined')}
         >
-          🌊 Solana Portfolio
+          🌐 Keseluruhan (Gabungan USD & IDR)
         </button>
         <button
           style={{
             ...styles.tabButton,
-            ...(activeTab === 'tokocrypto' ? styles.tabButtonActive : {}),
+            ...(activeTab === 'tokocrypto' ? styles.tabButtonActiveToko : {}),
           }}
           onClick={() => setActiveTab('tokocrypto')}
         >
-          💰 Tokocrypto Portfolio
+          🤖 Tokocrypto Hunter (CEX)
+        </button>
+        <button
+          style={{
+            ...styles.tabButton,
+            ...(activeTab === 'solana' ? styles.tabButtonActiveSolana : {}),
+          }}
+          onClick={() => setActiveTab('solana')}
+        >
+          ☀️ Solana Portfolio (DEX)
         </button>
       </div>
+
+      {/* ===== SOLANA SUB-STRATEGY FILTER (ALL / TRADER v4 / SNIPER v3) ===== */}
+      {activeTab === 'solana' && (
+        <div style={styles.subFilterBar}>
+          <span style={styles.subFilterLabel}>Filter Strategi Solana:</span>
+          {[
+            { id: 'ALL', label: '🌊 Semua Solana (Trader + Sniper)' },
+            { id: 'TRADER', label: '📈 Solana Trader v4 (Swing/Pullback)' },
+            { id: 'SNIPER', label: '⚡ Solana Sniper v3 (Fast Momentum)' },
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setSolanaStrategyFilter(item.id)}
+              style={{
+                ...styles.subFilterBtn,
+                ...(solanaStrategyFilter === item.id ? styles.subFilterBtnActive : {}),
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ===== FILTER CONTROLS ===== */}
       <div style={styles.filterContainer}>
@@ -216,136 +224,255 @@ const AnalyticsTab = () => {
           >
             {loading ? '⏳ Loading...' : '🔍 Apply Filter'}
           </button>
-          <button
-            onClick={handleResetFilters}
-            style={styles.buttonReset}
-          >
+          <button onClick={handleResetFilters} style={styles.buttonReset}>
             🔄 Reset
           </button>
         </div>
       </div>
 
-      {/* ===== ERROR MESSAGE ===== */}
-      {error && (
-        <div style={styles.errorMessage}>
-          ❌ {error}
-        </div>
-      )}
+      {error && <div style={styles.errorMessage}>❌ {error}</div>}
+      {loading && <div style={styles.loadingMessage}>⏳ Memuat data analytics...</div>}
 
-      {/* ===== LOADING STATE ===== */}
-      {loading && (
-        <div style={styles.loadingMessage}>
-          ⏳ Loading analytics data...
-        </div>
-      )}
-
-      {/* ===== SUMMARY CARDS ===== */}
-      {analyticsData && !loading && (
+      {/* =========================================================
+          VIEW 1: KESELURUHAN / COMBINED ANALYTICS
+         ========================================================= */}
+      {analyticsData && !loading && activeTab === 'combined' && (
         <>
           <div style={styles.summaryCardsContainer}>
-            {/* Total Profit Card */}
             <SummaryCard
-              title="Total Profit"
-              value={
-                activeTab === 'solana'
-                  ? analyticsData.summary.net_profit_sol
-                  : analyticsData.summary.net_profit_usdt
-              }
-              suffix={activeTab === 'solana' ? 'SOL' : 'USDT'}
-              isSol={activeTab === 'solana'}
-              color={getColorByValue(
-                activeTab === 'solana'
-                  ? analyticsData.summary.net_profit_sol
-                  : analyticsData.summary.net_profit_usdt
-              )}
-              icon="💰"
+              title="Total Net Profit (Gabungan)"
+              value={summary.net_profit_usd || 0}
+              prefix="$"
+              subtitle={formatIdr(summary.net_profit_idr || 0)}
+              color={getColorByValue(summary.net_profit_usd)}
+              icon="🌐"
             />
-
-            {/* Win Rate Card */}
             <SummaryCard
-              title="Win Rate"
-              value={analyticsData.summary.win_rate}
+              title="Kontribusi Tokocrypto"
+              value={summary.tokocrypto_net_usd || 0}
+              prefix="$"
+              subtitle={`${breakdown?.tokocrypto?.total_trades || 0} trades (WR ${breakdown?.tokocrypto?.win_rate || 0}%)`}
+              color={getColorByValue(summary.tokocrypto_net_usd)}
+              icon="🤖"
+            />
+            <SummaryCard
+              title="Kontribusi Solana DEX"
+              value={summary.solana_net_usd || 0}
+              prefix="$"
+              subtitle={`${(summary.solana_net_sol || 0).toFixed(4)} SOL (${breakdown?.solana?.total_trades || 0} trades)`}
+              color={getColorByValue(summary.solana_net_usd)}
+              icon="☀️"
+            />
+            <SummaryCard
+              title="Win Rate Keseluruhan"
+              value={summary.win_rate || 0}
               suffix="%"
+              subtitle={`${summary.winning_trades || 0}W / ${summary.losing_trades || 0}L (${summary.total_trades || 0} total)`}
               color="#3b82f6"
               icon="🎯"
             />
-
-            {/* Total Trades Card */}
             <SummaryCard
-              title="Total Trades"
-              value={analyticsData.summary.total_trades}
-              suffix=""
+              title="Profit Factor Gabungan"
+              value={summary.profit_factor || 0}
+              suffix="x"
+              subtitle={`Gross +$${(summary.total_profit_usd || 0).toFixed(2)} / -$${Math.abs(summary.total_loss_usd || 0).toFixed(2)}`}
               color="#8b5cf6"
-              icon="📈"
+              icon="⚖️"
             />
-
-            {/* Winning Trades Card */}
-            <SummaryCard
-              title="Winning Trades"
-              value={analyticsData.summary.winning_trades}
-              suffix=""
-              color="#10b981"
-              icon="✅"
-            />
-
-            {/* Losing Trades Card */}
-            <SummaryCard
-              title="Losing Trades"
-              value={analyticsData.summary.losing_trades}
-              suffix=""
-              color="#ef4444"
-              icon="❌"
-            />
-
-            {/* Additional Info (Profit vs Loss) */}
-            {activeTab === 'solana' ? (
-              <>
-                <SummaryCard
-                  title="Total Revenue (SOL)"
-                  value={analyticsData.summary.total_profit_sol}
-                  suffix="SOL"
-                  color="#10b981"
-                  icon="📈"
-                />
-                <SummaryCard
-                  title="Total Invested (SOL)"
-                  value={analyticsData.summary.total_loss_sol}
-                  suffix="SOL"
-                  color="#ef4444"
-                  icon="📉"
-                />
-              </>
-            ) : (
-              <>
-                <SummaryCard
-                  title="Total Revenue (USDT)"
-                  value={analyticsData.summary.total_profit_usdt}
-                  suffix="USDT"
-                  color="#10b981"
-                  icon="📈"
-                />
-                <SummaryCard
-                  title="Total Invested (USDT)"
-                  value={analyticsData.summary.total_loss_usdt}
-                  suffix="USDT"
-                  color="#ef4444"
-                  icon="📉"
-                />
-              </>
-            )}
           </div>
 
-          {/* ===== CHARTS ===== */}
-          {analyticsData.data && analyticsData.data.length > 0 ? (
+          {/* ===== PER-ENGINE BREAKDOWN TABLE ===== */}
+          <div style={styles.tableCard}>
+            <h2 style={styles.chartTitle}>📋 Perbandingan Performa Per Jenis Bot</h2>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={styles.comparisonTable}>
+                <thead>
+                  <tr style={styles.tableHeaderRow}>
+                    <th style={styles.th}>Jenis Mesin / Strategi</th>
+                    <th style={styles.th}>Total Trades</th>
+                    <th style={styles.th}>Win / Loss</th>
+                    <th style={styles.th}>Win Rate</th>
+                    <th style={styles.th}>Profit Factor</th>
+                    <th style={styles.th}>Net Profit (Native)</th>
+                    <th style={styles.th}>Net Profit (USD)</th>
+                    <th style={styles.th}>Estimasi Rupiah</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    {
+                      name: '🤖 Tokocrypto Hunter v2 (CEX)',
+                      badgeBg: '#2563eb',
+                      trades: breakdown?.tokocrypto?.total_trades || 0,
+                      wins: breakdown?.tokocrypto?.winning_trades || 0,
+                      losses: breakdown?.tokocrypto?.losing_trades || 0,
+                      wr: breakdown?.tokocrypto?.win_rate || 0,
+                      pf: breakdown?.tokocrypto?.profit_factor || 0,
+                      native: `$${Number(breakdown?.tokocrypto?.net_profit_usdt || 0).toFixed(2)} USDT`,
+                      usd: Number(breakdown?.tokocrypto?.net_profit_usdt || 0),
+                      idr: Number(breakdown?.tokocrypto?.net_profit_idr || 0),
+                    },
+                    {
+                      name: '📈 Solana Trader v4 (DEX Pullback)',
+                      badgeBg: '#7c3aed',
+                      trades: breakdown?.solana_trader?.total_trades || 0,
+                      wins: breakdown?.solana_trader?.winning_trades || 0,
+                      losses: breakdown?.solana_trader?.losing_trades || 0,
+                      wr: breakdown?.solana_trader?.win_rate || 0,
+                      pf: breakdown?.solana_trader?.profit_factor || 0,
+                      native: `${Number(breakdown?.solana_trader?.net_profit_sol || 0).toFixed(5)} SOL`,
+                      usd: Number(breakdown?.solana_trader?.net_profit_usd || 0),
+                      idr: Number(breakdown?.solana_trader?.net_profit_idr || 0),
+                    },
+                    {
+                      name: '⚡ Solana Sniper v3 (DEX Momentum)',
+                      badgeBg: '#db2777',
+                      trades: breakdown?.solana_sniper?.total_trades || 0,
+                      wins: breakdown?.solana_sniper?.winning_trades || 0,
+                      losses: breakdown?.solana_sniper?.losing_trades || 0,
+                      wr: breakdown?.solana_sniper?.win_rate || 0,
+                      pf: breakdown?.solana_sniper?.profit_factor || 0,
+                      native: `${Number(breakdown?.solana_sniper?.net_profit_sol || 0).toFixed(5)} SOL`,
+                      usd: Number(breakdown?.solana_sniper?.net_profit_usd || 0),
+                      idr: Number(breakdown?.solana_sniper?.net_profit_idr || 0),
+                    },
+                  ].map((row, idx) => (
+                    <tr key={idx} style={styles.tableRow}>
+                      <td style={styles.td}>
+                        <span style={{ ...styles.engineBadge, backgroundColor: row.badgeBg }}>{row.name}</span>
+                      </td>
+                      <td style={styles.td}>{row.trades}</td>
+                      <td style={styles.td}>
+                        <span style={{ color: '#10b981', fontWeight: 700 }}>{row.wins}W</span> /{' '}
+                        <span style={{ color: '#ef4444', fontWeight: 700 }}>{row.losses}L</span>
+                      </td>
+                      <td style={styles.td}><strong>{row.wr.toFixed(1)}%</strong></td>
+                      <td style={styles.td}>{row.pf.toFixed(2)}x</td>
+                      <td style={{ ...styles.td, fontWeight: 700, color: getColorByValue(row.usd) }}>{row.native}</td>
+                      <td style={{ ...styles.td, fontWeight: 700, color: getColorByValue(row.usd) }}>
+                        {row.usd >= 0 ? `+$${row.usd.toFixed(2)}` : `-$${Math.abs(row.usd).toFixed(2)}`}
+                      </td>
+                      <td style={{ ...styles.td, fontWeight: 700, color: getColorByValue(row.idr) }}>
+                        {formatIdr(row.idr)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ===== COMBINED CHARTS ===== */}
+          {chartData.length > 0 ? (
             <div style={styles.chartsContainer}>
-              {/* Growth Chart (Cumulative Profit) */}
               <div style={styles.chartWrapper}>
-                <h2 style={styles.chartTitle}>📈 Cumulative Profit Growth</h2>
+                <h2 style={styles.chartTitle}>📈 Pertumbuhan Profit Kumulatif: Total vs Tokocrypto vs Solana (USD)</h2>
+                <ResponsiveContainer width="100%" height={320}>
+                  <LineChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" angle={-45} textAnchor="end" height={70} tick={{ fontSize: 12 }} />
+                    <YAxis tick={{ fontSize: 12 }} />
+                    <Tooltip formatter={(val) => `$${Number(val).toFixed(2)}`} />
+                    <Legend />
+                    <Line type="monotone" dataKey="cumulative_profit_usd" stroke="#10b981" strokeWidth={3} name="Total Gabungan ($)" />
+                    <Line type="monotone" dataKey="cumulative_tokocrypto_usd" stroke="#2563eb" strokeWidth={2} name="Tokocrypto Hunter ($)" />
+                    <Line type="monotone" dataKey="cumulative_solana_usd" stroke="#9333ea" strokeWidth={2} name="Solana DEX ($)" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div style={styles.chartWrapper}>
+                <h2 style={styles.chartTitle}>📊 Perbandingan Profit/Loss Per Periode: Tokocrypto vs Solana (USD)</h2>
                 <ResponsiveContainer width="100%" height={300}>
-                  <AreaChart
-                    data={analyticsData.data}
-                    margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
-                  >
+                  <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" angle={-45} textAnchor="end" height={70} tick={{ fontSize: 12 }} />
+                    <YAxis tick={{ fontSize: 12 }} />
+                    <Tooltip formatter={(val) => `$${Number(val).toFixed(2)}`} />
+                    <Legend />
+                    <Bar dataKey="tokocrypto_profit_usd" fill="#2563eb" name="Tokocrypto Profit ($)" />
+                    <Bar dataKey="solana_profit_usd" fill="#9333ea" name="Solana Profit ($)" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          ) : (
+            <div style={styles.noDataMessage}>📭 Belum ada transaksi tertutup pada periode yang dipilih.</div>
+          )}
+        </>
+      )}
+
+      {/* =========================================================
+          VIEW 2 & 3: TOKOCRYPTO OR SOLANA INDIVIDUAL ANALYTICS
+         ========================================================= */}
+      {analyticsData && !loading && activeTab !== 'combined' && (
+        <>
+          <div style={styles.summaryCardsContainer}>
+            <SummaryCard
+              title={activeTab === 'solana' ? `Net Profit Solana (${solanaStrategyFilter})` : 'Net Profit Tokocrypto'}
+              value={activeTab === 'solana' ? summary.net_profit_sol : summary.net_profit_usdt}
+              suffix={activeTab === 'solana' ? 'SOL' : 'USDT'}
+              isSol={activeTab === 'solana'}
+              subtitle={
+                activeTab === 'solana'
+                  ? `$${Number(summary.net_profit_usd || 0).toFixed(2)} (${formatIdr(summary.net_profit_idr || 0)})`
+                  : formatIdr(summary.net_profit_idr || 0)
+              }
+              color={getColorByValue(activeTab === 'solana' ? summary.net_profit_sol : summary.net_profit_usdt)}
+              icon="💰"
+            />
+            <SummaryCard
+              title="Win Rate"
+              value={summary.win_rate || 0}
+              suffix="%"
+              subtitle={`${summary.winning_trades || 0} Menang / ${summary.losing_trades || 0} Kalah`}
+              color="#3b82f6"
+              icon="🎯"
+            />
+            <SummaryCard
+              title="Profit Factor"
+              value={summary.profit_factor || 0}
+              suffix="x"
+              subtitle={`Total ${summary.total_trades || 0} Closed Trades`}
+              color="#8b5cf6"
+              icon="⚖️"
+            />
+            <SummaryCard
+              title="Gross Profit (Winning)"
+              value={activeTab === 'solana' ? summary.total_profit_sol : summary.total_profit_usdt}
+              suffix={activeTab === 'solana' ? 'SOL' : 'USDT'}
+              isSol={activeTab === 'solana'}
+              subtitle={
+                activeTab === 'solana'
+                  ? `Avg Win: +${Number(summary.avg_win_sol || 0).toFixed(5)} SOL`
+                  : `Avg Win: +$${Number(summary.avg_win_usdt || 0).toFixed(2)}`
+              }
+              color="#10b981"
+              icon="📈"
+            />
+            <SummaryCard
+              title="Gross Loss (Losing)"
+              value={activeTab === 'solana' ? summary.total_loss_sol : summary.total_loss_usdt}
+              suffix={activeTab === 'solana' ? 'SOL' : 'USDT'}
+              isSol={activeTab === 'solana'}
+              subtitle={
+                activeTab === 'solana'
+                  ? `Avg Loss: ${Number(summary.avg_loss_sol || 0).toFixed(5)} SOL`
+                  : `Avg Loss: $${Number(summary.avg_loss_usdt || 0).toFixed(2)}`
+              }
+              color="#ef4444"
+              icon="📉"
+            />
+          </div>
+
+          {chartData.length > 0 ? (
+            <div style={styles.chartsContainer}>
+              <div style={styles.chartWrapper}>
+                <h2 style={styles.chartTitle}>
+                  📈 Cumulative Profit Growth ({activeTab === 'solana' ? `Solana ${solanaStrategyFilter} - SOL` : 'Tokocrypto - USDT'})
+                </h2>
+                <ResponsiveContainer width="100%" height={300}>
+                  <AreaChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="colorGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#10b981" stopOpacity={0.8} />
@@ -353,30 +480,16 @@ const AnalyticsTab = () => {
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="date"
-                      angle={-45}
-                      textAnchor="end"
-                      height={80}
-                      style={{ fontSize: '12px', fontWeight: '500' }}
-                      tick={{ fontSize: 12, fontWeight: 500 }}
-                    />
-                    <YAxis style={{ fontSize: '12px', fontWeight: '500' }} />
+                    <XAxis dataKey="date" angle={-45} textAnchor="end" height={70} tick={{ fontSize: 12 }} />
+                    <YAxis tick={{ fontSize: 12 }} />
                     <Tooltip
                       formatter={(value) =>
-                        activeTab === 'solana'
-                          ? `${value.toFixed(8)} SOL`
-                          : `$${value.toFixed(2)}`
+                        activeTab === 'solana' ? `${Number(value).toFixed(6)} SOL` : `$${Number(value).toFixed(2)}`
                       }
-                      contentStyle={{ fontSize: '13px', fontWeight: '600' }}
                     />
                     <Area
                       type="monotone"
-                      dataKey={
-                        activeTab === 'solana'
-                          ? 'cumulative_profit_sol'
-                          : 'cumulative_profit'
-                      }
+                      dataKey={activeTab === 'solana' ? 'cumulative_profit_sol' : 'cumulative_profit'}
                       stroke="#10b981"
                       fillOpacity={1}
                       fill="url(#colorGradient)"
@@ -385,96 +498,30 @@ const AnalyticsTab = () => {
                 </ResponsiveContainer>
               </div>
 
-              {/* Profit/Loss Bar Chart */}
               <div style={styles.chartWrapper}>
                 <h2 style={styles.chartTitle}>📊 Profit/Loss per Period</h2>
                 <ResponsiveContainer width="100%" height={300}>
-                  <BarChart
-                    data={analyticsData.data}
-                    margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
-                  >
+                  <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="date"
-                      angle={-45}
-                      textAnchor="end"
-                      height={80}
-                      style={{ fontSize: '12px', fontWeight: '500' }}
-                      tick={{ fontSize: 12, fontWeight: 500 }}
-                    />
-                    <YAxis style={{ fontSize: '12px', fontWeight: '500' }} />
+                    <XAxis dataKey="date" angle={-45} textAnchor="end" height={70} tick={{ fontSize: 12 }} />
+                    <YAxis tick={{ fontSize: 12 }} />
                     <Tooltip
                       formatter={(value) =>
-                        activeTab === 'solana'
-                          ? `${value.toFixed(8)} SOL`
-                          : `$${value.toFixed(2)}`
+                        activeTab === 'solana' ? `${Number(value).toFixed(6)} SOL` : `$${Number(value).toFixed(2)}`
                       }
-                      contentStyle={{ fontSize: '13px', fontWeight: '600' }}
                     />
-                    <Legend wrapperStyle={{ fontSize: '12px', fontWeight: '600' }} />
+                    <Legend />
                     <Bar
-                      dataKey={
-                        activeTab === 'solana' ? 'profit_sol' : 'profit_usdt'
-                      }
-                      fill="#3b82f6"
-                      name={
-                        activeTab === 'solana' ? 'Profit (SOL)' : 'Profit (USDT)'
-                      }
+                      dataKey={activeTab === 'solana' ? 'profit_sol' : 'profit_usdt'}
+                      fill={activeTab === 'solana' ? '#9333ea' : '#2563eb'}
+                      name={activeTab === 'solana' ? 'Profit (SOL)' : 'Profit (USDT)'}
                     />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-
-              {/* Line Chart (Alternative View) */}
-              <div style={styles.chartWrapper}>
-                <h2 style={styles.chartTitle}>📉 Trend Analysis</h2>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart
-                    data={analyticsData.data}
-                    margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="date"
-                      angle={-45}
-                      textAnchor="end"
-                      height={80}
-                      style={{ fontSize: '12px', fontWeight: '500' }}
-                      tick={{ fontSize: 12, fontWeight: 500 }}
-                    />
-                    <YAxis style={{ fontSize: '12px', fontWeight: '500' }} />
-                    <Tooltip
-                      formatter={(value) =>
-                        activeTab === 'solana'
-                          ? `${value.toFixed(8)} SOL`
-                          : `$${value.toFixed(2)}`
-                      }
-                      contentStyle={{ fontSize: '13px', fontWeight: '600' }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: '12px', fontWeight: '600' }} />
-                    <Line
-                      type="monotone"
-                      dataKey={
-                        activeTab === 'solana'
-                          ? 'cumulative_profit_sol'
-                          : 'cumulative_profit'
-                      }
-                      stroke="#10b981"
-                      name={
-                        activeTab === 'solana'
-                          ? 'Cumulative Profit (SOL)'
-                          : 'Cumulative Profit (USDT)'
-                      }
-                      strokeWidth={2}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
             </div>
           ) : (
-            <div style={styles.noDataMessage}>
-              📭 No data available for the selected filters
-            </div>
+            <div style={styles.noDataMessage}>📭 Belum ada data untuk filter ini.</div>
           )}
         </>
       )}
@@ -482,29 +529,26 @@ const AnalyticsTab = () => {
   );
 };
 
-// =========================================
-// SUMMARY CARD COMPONENT
-// =========================================
-const SummaryCard = ({ title, value, suffix, color, icon }) => {
-  const formattedValue =
-    typeof value === 'number' && value % 1 !== 0
-      ? value.toFixed(suffix === '' ? 0 : suffix === 'SOL' ? 8 : 2)
-      : value;
+const SummaryCard = ({ title, value, prefix = '', suffix = '', isSol = false, subtitle = '', color, icon }) => {
+  const num = Number(value || 0);
+  const formattedValue = isSol
+    ? num.toFixed(6)
+    : typeof value === 'number' && value % 1 !== 0
+    ? num.toFixed(2)
+    : num;
 
   return (
     <div style={{ ...styles.summaryCard, borderLeft: `4px solid ${color}` }}>
       <div style={styles.cardIcon}>{icon}</div>
       <div style={styles.cardTitle}>{title}</div>
       <div style={{ ...styles.cardValue, color }}>
-        {formattedValue} {suffix}
+        {prefix}{formattedValue} {suffix}
       </div>
+      {subtitle && <div style={styles.cardSubtitle}>{subtitle}</div>}
     </div>
   );
 };
 
-// =========================================
-// STYLING
-// =========================================
 const styles = {
   container: {
     padding: '20px',
@@ -513,19 +557,20 @@ const styles = {
     fontFamily: 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
   },
   title: {
-    fontSize: '32px',
+    fontSize: '26px',
     fontWeight: '900',
-    marginBottom: '25px',
+    marginBottom: '20px',
     color: '#0f172a',
   },
   tabSwitcher: {
     display: 'flex',
     gap: '10px',
-    marginBottom: '20px',
+    marginBottom: '16px',
     borderBottom: '2px solid #e5e7eb',
+    flexWrap: 'wrap',
   },
   tabButton: {
-    padding: '12px 24px',
+    padding: '12px 20px',
     border: 'none',
     backgroundColor: 'transparent',
     color: '#6b7280',
@@ -533,11 +578,53 @@ const styles = {
     fontSize: '15px',
     fontWeight: '600',
     borderBottom: '3px solid transparent',
-    transition: 'all 0.3s ease',
+    transition: 'all 0.2s ease',
   },
-  tabButtonActive: {
-    color: '#1f2937',
-    borderBottom: '3px solid #3b82f6',
+  tabButtonActiveCombined: {
+    color: '#059669',
+    borderBottom: '3px solid #10b981',
+    fontWeight: '800',
+  },
+  tabButtonActiveToko: {
+    color: '#1d4ed8',
+    borderBottom: '3px solid #2563eb',
+    fontWeight: '800',
+  },
+  tabButtonActiveSolana: {
+    color: '#7e22ce',
+    borderBottom: '3px solid #9333ea',
+    fontWeight: '800',
+  },
+  subFilterBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    marginBottom: '16px',
+    padding: '12px 16px',
+    backgroundColor: '#f3e8ff',
+    borderRadius: '8px',
+    border: '1px solid #d8b4fe',
+    flexWrap: 'wrap',
+  },
+  subFilterLabel: {
+    fontSize: '13px',
+    fontWeight: '700',
+    color: '#581c87',
+  },
+  subFilterBtn: {
+    padding: '7px 14px',
+    borderRadius: '6px',
+    border: '1px solid #c084fc',
+    backgroundColor: '#ffffff',
+    color: '#6b21a8',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: '600',
+  },
+  subFilterBtnActive: {
+    backgroundColor: '#7e22ce',
+    color: '#ffffff',
+    borderColor: '#7e22ce',
     fontWeight: '700',
   },
   filterContainer: {
@@ -556,14 +643,12 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: '5px',
-    pointerEvents: 'auto',
   },
   label: {
     fontSize: '13px',
     fontWeight: '700',
     color: '#1f2937',
     textTransform: 'uppercase',
-    letterSpacing: '0.5px',
   },
   select: {
     padding: '10px 12px',
@@ -575,7 +660,6 @@ const styles = {
     backgroundColor: 'white',
     color: '#1f2937',
     cursor: 'pointer',
-    transition: 'border-color 0.2s',
   },
   filterButtons: {
     display: 'flex',
@@ -590,8 +674,6 @@ const styles = {
     cursor: 'pointer',
     fontSize: '14px',
     fontWeight: '700',
-    transition: 'background-color 0.3s, box-shadow 0.2s',
-    boxShadow: '0 2px 4px rgba(59, 130, 246, 0.3)',
   },
   buttonReset: {
     padding: '10px 18px',
@@ -602,7 +684,6 @@ const styles = {
     cursor: 'pointer',
     fontSize: '14px',
     fontWeight: '700',
-    transition: 'background-color 0.3s, box-shadow 0.2s',
   },
   errorMessage: {
     padding: '14px 16px',
@@ -612,7 +693,6 @@ const styles = {
     marginBottom: '20px',
     fontSize: '14px',
     fontWeight: '600',
-    border: '1px solid #fca5a5',
   },
   loadingMessage: {
     padding: '25px',
@@ -622,58 +702,102 @@ const styles = {
     fontWeight: '600',
   },
   noDataMessage: {
-    padding: '50px 20px',
+    padding: '40px 20px',
     textAlign: 'center',
     color: '#6b7280',
-    fontSize: '16px',
+    fontSize: '15px',
     fontWeight: '600',
+    backgroundColor: '#ffffff',
+    borderRadius: '8px',
+    border: '1px solid #e5e7eb',
   },
   summaryCardsContainer: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
     gap: '15px',
-    marginBottom: '30px',
+    marginBottom: '25px',
   },
   summaryCard: {
-    padding: '22px',
+    padding: '20px',
     backgroundColor: 'white',
     borderRadius: '8px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-    transition: 'transform 0.2s, box-shadow 0.2s',
-    borderLeft: '4px solid #d1d5db',
   },
   cardIcon: {
-    fontSize: '32px',
-    marginBottom: '12px',
+    fontSize: '28px',
+    marginBottom: '8px',
   },
   cardTitle: {
-    fontSize: '13px',
+    fontSize: '12px',
     color: '#374151',
     fontWeight: '700',
     textTransform: 'uppercase',
-    marginBottom: '10px',
-    letterSpacing: '0.5px',
+    marginBottom: '8px',
   },
   cardValue: {
-    fontSize: '24px',
+    fontSize: '22px',
     fontWeight: '900',
+  },
+  cardSubtitle: {
+    fontSize: '12px',
+    color: '#6b7280',
+    marginTop: '6px',
+    fontWeight: '600',
+  },
+  tableCard: {
+    backgroundColor: 'white',
+    padding: '20px',
+    borderRadius: '8px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+    border: '1px solid #e5e7eb',
+    marginBottom: '25px',
+  },
+  comparisonTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: '13px',
+    color: '#1f2937',
+  },
+  tableHeaderRow: {
+    backgroundColor: '#f3f4f6',
+    borderBottom: '2px solid #e5e7eb',
+    textAlign: 'left',
+  },
+  th: {
+    padding: '10px 12px',
+    fontWeight: '700',
+    color: '#374151',
+  },
+  tableRow: {
+    borderBottom: '1px solid #e5e7eb',
+  },
+  td: {
+    padding: '12px',
+  },
+  engineBadge: {
+    display: 'inline-block',
+    padding: '4px 10px',
+    borderRadius: '6px',
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: '12px',
   },
   chartsContainer: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '30px',
+    gap: '25px',
   },
   chartWrapper: {
     backgroundColor: 'white',
-    padding: '25px',
+    padding: '22px',
     borderRadius: '8px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
     border: '1px solid #e5e7eb',
   },
   chartTitle: {
-    fontSize: '18px',
+    fontSize: '17px',
     fontWeight: '800',
-    marginBottom: '18px',
+    marginBottom: '16px',
     color: '#0f172a',
   },
 };

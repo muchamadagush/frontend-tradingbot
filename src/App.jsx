@@ -26,6 +26,75 @@ const VITE_WS_URL = typeof import.meta.env.VITE_WS_URL !== 'undefined' && import
   ? import.meta.env.VITE_WS_URL
   : getWsUrl()
 
+// Helper: enrich Solana trades with FIFO realized PnL (SOL & %) by matching BUY -> SELL pairs
+function enrichSolanaTradesWithPnL(solTrades) {
+  if (!Array.isArray(solTrades)) return []
+  const chronological = [...solTrades].sort((a, b) => {
+    const tA = new Date(a.created_at || a.timestamp || 0).getTime()
+    const tB = new Date(b.created_at || b.timestamp || 0).getTime()
+    return tA - tB
+  })
+
+  const inventory = {} // key -> [{ tokens, sol_cost }]
+  const pnlByKey = {}
+
+  for (const t of chronological) {
+    const side = String(t.side || '').toUpperCase()
+    const tokenKey = t.token_address || t.symbol || 'UNKNOWN'
+    const amtIn = Number(t.amount_in || 0)
+    const amtOut = Number(t.amount_out || 0)
+    const rowId = t.id || `${t.timestamp}_${t.side}_${t.symbol}`
+
+    if (side === 'BUY') {
+      if (!inventory[tokenKey]) inventory[tokenKey] = []
+      if (amtOut > 0) {
+        inventory[tokenKey].push({ tokens: amtOut, sol_cost: amtIn })
+      }
+      pnlByKey[rowId] = { cost_sol: amtIn }
+    } else if (side === 'SELL') {
+      let toMatch = amtIn
+      let matchedCostSol = 0
+      const queue = inventory[tokenKey] || []
+
+      while (queue.length > 0 && toMatch > 1e-9) {
+        const lot = queue[0]
+        if (lot.tokens <= 1e-9) {
+          queue.shift()
+          continue
+        }
+        const take = Math.min(toMatch, lot.tokens)
+        const fraction = take / lot.tokens
+        const costTaken = fraction * lot.sol_cost
+        matchedCostSol += costTaken
+        lot.tokens -= take
+        lot.sol_cost -= costTaken
+        toMatch -= take
+        if (lot.tokens <= 1e-9) queue.shift()
+      }
+
+      if (matchedCostSol > 0) {
+        const pnlSol = amtOut - matchedCostSol
+        const pnlPct = (pnlSol / matchedCostSol) * 100
+        pnlByKey[rowId] = {
+          cost_sol: matchedCostSol,
+          pnl_sol: pnlSol,
+          pnl_pct: pnlPct,
+          is_profit: pnlSol >= 0,
+        }
+      }
+    }
+  }
+
+  return solTrades.map(t => {
+    const rowId = t.id || `${t.timestamp}_${t.side}_${t.symbol}`
+    return {
+      ...t,
+      source: 'Jupiter',
+      ...(pnlByKey[rowId] || {}),
+    }
+  })
+}
+
 function App() {
   const [serverStatus, setServerStatus] = useState("Checking...")
   const [activeTab, setActiveTab] = useState('trading')
@@ -52,6 +121,10 @@ function App() {
   const [solanaStrategy, setSolanaStrategy] = useState('TRADER')
 
   const [systemLogs, setSystemLogs] = useState([])
+  const [tokoLogs, setTokoLogs] = useState([])
+  const [solanaLogs, setSolanaLogs] = useState([])
+  const [logChannelView, setLogChannelView] = useState("SPLIT") // ALL | TOKOCRYPTO | SOLANA | SPLIT
+  const [historyFilter, setHistoryFilter] = useState("ALL") // ALL | Hunter | Jupiter
 
   // --- DATA PENDUKUNG ---
   const [history, setHistory] = useState([])
@@ -60,7 +133,7 @@ function App() {
   // --- WEBSOCKET MESSAGE HANDLER ---
   const handleWsMessage = useCallback((message) => {
     const { type, data } = message
-
+    
     switch (type) {
       case 'connected':
         setServerStatus("Connected (WS)")
@@ -72,10 +145,9 @@ function App() {
           }))
         }
         break
-
+        
       case 'bot_status':
         setBotStatus(data)
-        // Update active symbol from activity
         if (data.current_activity) {
           const parts = data.current_activity.split(" ")
           if (parts.length > 1 && (data.current_activity.includes("Managing") || data.current_activity.includes("Scanning"))) {
@@ -83,9 +155,8 @@ function App() {
           }
         }
         break
-
+        
       case 'trade_update':
-        // Add or update trade in history
         setHistory(prev => {
           const exists = prev.find(t => t.id === data.id && t.source === 'Hunter')
           if (exists) {
@@ -94,28 +165,36 @@ function App() {
           return [{ ...data, source: 'Hunter' }, ...prev].slice(0, 50)
         })
         break
-
-      case 'system_log':
-        setSystemLogs(prev => [data.message, ...prev].slice(0, 50))
+        
+      case 'system_log': {
+        const msg = data.message || ""
+        const src = (data.source || "").toUpperCase()
+        setSystemLogs(prev => [...prev.slice(-149), msg])
+        if (src === "SOLANA" || msg.includes("[SOL]")) {
+          setSolanaLogs(prev => [...prev.slice(-99), msg])
+        } else if (src === "TOKOCRYPTO" || msg.includes("[TOKO]")) {
+          setTokoLogs(prev => [...prev.slice(-99), msg])
+        }
         break
-
+      }
+        
       case 'balance_update':
         setBalances(data)
         break
-
+        
       case 'solana_status':
         setSolanaAutoStatus(data)
         if (data.strategy && data.is_running) {
           setSolanaStrategy(data.strategy)
         }
         break
-
+        
       case 'price_update':
         if (data.symbol === activeSymbol) {
           setMarketData(prev => ({ ...prev, ...data }))
         }
         break
-
+        
       default:
         break
     }
@@ -125,11 +204,12 @@ function App() {
   const { isConnected, connectionState, shouldUseFallback } = useWebSocket(
     VITE_WS_URL,
     handleWsMessage,
-    { fallbackPolling: true, pollingInterval: 2000 }
+    { fallbackPolling: true, pollingInterval: 3000 }
   )
 
   // --- FUNGSI UTAMA (FETCH DATA LOOP) ---
   const fetchData = async () => {
+    if (typeof document !== 'undefined' && document.hidden) return
     try {
       // 1. Cek Status Bot Hunter
       const resBot = await axios.get(`${VITE_API_URL}/api/bot/status`)
@@ -165,13 +245,13 @@ function App() {
         }
       } catch (e) { }
 
-      // 5. Global History
+      // 5. Global History (dengan kalkulasi PnL FIFO untuk Solana & status lengkap untuk Hunter)
       try {
         const resToko = await axios.get(`${VITE_API_URL}/api/trade/history`)
-        const tokoData = resToko.data.map(item => ({ ...item, source: 'Hunter' }))
+        const tokoData = (resToko.data || []).map(item => ({ ...item, source: 'Hunter' }))
 
         const resSol = await axios.get(`${VITE_API_URL}/api/solana/history`)
-        const solData = resSol.data.map(item => ({ ...item, source: 'Jupiter' }))
+        const solData = enrichSolanaTradesWithPnL(resSol.data || [])
 
         const combined = [...solData, ...tokoData].sort((a, b) => {
           const dateA = new Date(a.created_at || a.timestamp)
@@ -181,11 +261,15 @@ function App() {
         setHistory(combined)
       } catch (e) { console.error("History Error", e) }
 
-      // 6. Ambil System Logs
+      // 6. Ambil System Logs (Gabungan + Terpisah Tokocrypto & Solana)
       try {
         const resLogs = await axios.get(`${VITE_API_URL}/api/system/logs`)
-        const logs = resLogs.data?.logs || resLogs.data || []
-        setSystemLogs(Array.isArray(logs) ? logs : [])
+        const allLogs = resLogs.data?.logs || (Array.isArray(resLogs.data) ? resLogs.data : [])
+        const tLogs = resLogs.data?.tokocrypto_logs || allLogs.filter(l => String(l).includes("[TOKO]"))
+        const sLogs = resLogs.data?.solana_logs || allLogs.filter(l => String(l).includes("[SOL]"))
+        setSystemLogs(Array.isArray(allLogs) ? allLogs : [])
+        setTokoLogs(Array.isArray(tLogs) ? tLogs : [])
+        setSolanaLogs(Array.isArray(sLogs) ? sLogs : [])
       } catch (e) {
         console.error("System Logs Error", e)
       }
@@ -225,10 +309,10 @@ function App() {
         setSwapQuote(null)
       }
       setTimeout(fetchData, 4000)
-    } catch (e) {
-      alert("Gagal Swap: " + (e.response?.data?.error || e.message))
-    } finally {
-      setIsSwapping(false)
+    } catch (e) { 
+      alert("Gagal Swap: " + (e.response?.data?.error || e.message)) 
+    } finally { 
+      setIsSwapping(false) 
     }
   }
 
@@ -251,7 +335,7 @@ function App() {
       }
     }
     checkAuth()
-
+    
     const handleAuthExpired = () => {
       setAuthRequired(true)
       setAuthError('Session expired. Please login again.')
@@ -282,19 +366,12 @@ function App() {
   // Polling fallback when WebSocket is not connected
   useEffect(() => {
     let interval;
-    // Fallback polling: only if fallback/disconnected
     if (shouldUseFallback) {
-      console.log('[Polling] Fallback polling aktif (WS tidak connect)', { shouldUseFallback, isConnected, connectionState })
-      interval = setInterval(fetchData, 2000)
+      interval = setInterval(fetchData, 3000)
     } else if (!shouldUseFallback && isConnected && connectionState === 'connected') {
-      // Light polling: only if fallback polling is NOT active
-      console.log('[Polling] WS connected, polling ringan balances/prices', { shouldUseFallback, isConnected, connectionState })
       interval = setInterval(() => {
         fetchBalancesAndPrices()
       }, 5000)
-    } else {
-      // No polling if reconnecting or unknown state
-      console.log('[Polling] Tidak ada polling (reconnecting/unknown)', { shouldUseFallback, isConnected, connectionState })
     }
     return () => {
       if (interval) clearInterval(interval)
@@ -303,16 +380,14 @@ function App() {
 
   // Lighter fetch for WS-connected mode
   const fetchBalancesAndPrices = async () => {
+    if (typeof document !== 'undefined' && document.hidden) return
     try {
-      // Solana balances
       const resBal = await axios.get(`${VITE_API_URL}/api/solana/balance`)
       setBalances(resBal.data)
-
-      // Market price
+      
       const resPrice = await axios.get(`${VITE_API_URL}/api/toko/price/${activeSymbol}`)
       setMarketData(resPrice.data)
-
-      // Solana auto status
+      
       const resAuto = await axios.get(`${VITE_API_URL}/api/solana/auto/status`)
       setSolanaAutoStatus(resAuto.data)
     } catch (e) {
@@ -339,18 +414,175 @@ function App() {
     { id: 'analytics', label: '📈 Analytics', icon: '📉' }
   ]
 
+  // Helper untuk merender kolom Side (membedakan OPEN vs CLOSED pada Hunter & BUY vs SELL pada Jupiter)
+  const renderTradeSide = (trade) => {
+    if (trade.source !== 'Jupiter') {
+      const st = String(trade.status || '').toUpperCase()
+      const isClosed = st.includes('CLOSED') || trade.side === 'SELL'
+      return (
+        <span style={{
+          fontWeight: 'bold',
+          color: isClosed ? '#8e44ad' : '#27ae60',
+          backgroundColor: isClosed ? '#f3e5f5' : '#e8f8f5',
+          padding: '2px 6px',
+          borderRadius: '4px',
+          fontSize: '11px'
+        }}>
+          {isClosed ? 'CLOSED' : 'BUY (OPEN)'}
+        </span>
+      )
+    }
+    return (
+      <span style={{ fontWeight: 'bold', color: trade.side === 'BUY' ? '#27ae60' : '#c0392b' }}>
+        {trade.side}
+      </span>
+    )
+  }
+
+  // Helper untuk merender kolom Amount secara jelas (baik untuk Hunter USDT maupun Jupiter SOL)
+  const renderTradeAmount = (trade) => {
+    const baseToken = (trade.symbol || '').split('/')[0] || 'TOKEN'
+
+    if (trade.source !== 'Jupiter') {
+      const totalUsdt = Number(trade.total_usdt || (Number(trade.buy_price || 0) * Number(trade.amount || 0)))
+      const coinQty = Number(trade.amount || 0)
+      return (
+        <div>
+          <span style={{ fontWeight: 'bold', color: '#2c3e50' }}>
+            ${totalUsdt.toFixed(2)} USDT
+          </span>
+          {coinQty > 0 && (
+            <div style={{ fontSize: '11px', color: '#7f8c8d' }}>
+              {coinQty.toLocaleString(undefined, { maximumFractionDigits: 6 })} {baseToken}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    const amtIn = Number(trade.amount_in || 0)
+    const amtOut = Number(trade.amount_out || 0)
+
+    if (trade.side === 'BUY') {
+      return (
+        <div>
+          <span style={{ fontWeight: 'bold', color: '#2c3e50' }}>
+            +{amtOut.toLocaleString(undefined, { maximumFractionDigits: 4 })} {baseToken}
+          </span>
+          {amtIn > 0 && (
+            <div style={{ fontSize: '11px', color: '#7f8c8d' }}>
+              Modal: {amtIn.toFixed(4)} SOL
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    // SELL: amount_out adalah SOL yang diterima kembali ke wallet
+    return (
+      <div>
+        <span style={{ fontWeight: 'bold', color: '#2c3e50' }}>
+          {amtOut.toFixed(6)} SOL
+        </span>
+        {amtIn > 0 && (
+          <div style={{ fontSize: '11px', color: '#7f8c8d' }}>
+            Jual: {amtIn.toLocaleString(undefined, { maximumFractionDigits: 2 })} {baseToken}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Helper untuk merender kolom Info (Badge Untung/Rugi + Harga Entry/Exit + Alasan Exit + Link TX)
+  const renderTradeInfo = (trade) => {
+    if (trade.source !== 'Jupiter') {
+      const buyPrice = Number(trade.buy_price || 0)
+      const sellPrice = Number(trade.sell_price || 0)
+      const totalUsdt = Number(trade.total_usdt || 0)
+      const hasPnl = trade.profit_usdt !== undefined && trade.profit_usdt !== null
+      const pnl = hasPnl ? Number(trade.profit_usdt) : 0
+      const pnlPct = (hasPnl && totalUsdt > 0) ? (pnl / totalUsdt) * 100 : (buyPrice > 0 && sellPrice > 0 ? ((sellPrice - buyPrice) / buyPrice) * 100 : 0)
+
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {hasPnl && (
+            <span style={{
+              display: 'inline-block',
+              width: 'fit-content',
+              fontWeight: 'bold',
+              color: pnl >= 0 ? '#155724' : '#721c24',
+              backgroundColor: pnl >= 0 ? '#d4edda' : '#f8d7da',
+              padding: '2px 6px',
+              borderRadius: '4px',
+              fontSize: '11px'
+            }}>
+              {pnl >= 0 ? 'UNTUNG' : 'RUGI'} {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+            </span>
+          )}
+          <div style={{ fontSize: '11px', color: '#7f8c8d' }}>
+            {buyPrice > 0 && (
+              <span>
+                Entry: ${buyPrice.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                {sellPrice > 0 ? ` ➜ Exit: $${sellPrice.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : ' (Masih Aktif)'}
+              </span>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    const hasPnl = trade.side === 'SELL' && typeof trade.pnl_sol === 'number'
+    const isWin = hasPnl ? trade.pnl_sol >= 0 : false
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        {hasPnl && (
+          <span style={{
+            display: 'inline-block',
+            width: 'fit-content',
+            fontWeight: 'bold',
+            color: isWin ? '#155724' : '#721c24',
+            backgroundColor: isWin ? '#d4edda' : '#f8d7da',
+            padding: '2px 6px',
+            borderRadius: '4px',
+            fontSize: '11px'
+          }}>
+            {isWin ? 'UNTUNG' : 'RUGI'} {trade.pnl_sol >= 0 ? '+' : ''}{trade.pnl_sol.toFixed(4)} SOL ({trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct.toFixed(2)}%)
+          </span>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px' }}>
+          {trade.status && trade.status !== 'Success' && (
+            <span style={{ color: '#7f8c8d' }}>{trade.status}</span>
+          )}
+          {trade.txid && trade.txid !== 'UNKNOWN' ? (
+            <a
+              href={`https://solscan.io/tx/${trade.txid}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: '#3498db', fontWeight: 'bold' }}
+            >
+              View TX
+            </a>
+          ) : (
+            <span>-</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   // Login form if auth required
   if (authRequired) {
     return (
-      <div style={{
-        padding: '20px', fontFamily: 'Arial', maxWidth: '400px', margin: '100px auto',
+      <div style={{ 
+        padding: '20px', fontFamily: 'Arial', maxWidth: '400px', margin: '100px auto', 
         color: '#ecf0f1', backgroundColor: '#2c3e50', borderRadius: '10px'
       }}>
         <div style={{ textAlign: 'center', marginBottom: '30px' }}>
           <h1>🦅 Crypto Hybrid Bot</h1>
           <p style={{ color: '#bdc3c7' }}>Authentication Required</p>
         </div>
-
+        
         <div style={{ marginBottom: '20px' }}>
           <label style={{ display: 'block', marginBottom: '8px', color: '#bdc3c7' }}>API Key</label>
           <input
@@ -365,11 +597,11 @@ function App() {
             }}
           />
         </div>
-
+        
         {authError && (
           <p style={{ color: '#e74c3c', marginBottom: '15px', fontSize: '14px' }}>{authError}</p>
         )}
-
+        
         <button
           onClick={handleLogin}
           style={{
@@ -380,9 +612,9 @@ function App() {
         >
           🔓 Login
         </button>
-
+        
         <p style={{ marginTop: '20px', fontSize: '12px', color: '#7f8c8d', textAlign: 'center' }}>
-          Set BOT_API_KEY in .env or API_KEYS for multiple keys.<br />
+          Set BOT_API_KEY in .env or API_KEYS for multiple keys.<br/>
           Set AUTH_MODE=disabled to skip authentication.
         </p>
       </div>
@@ -471,14 +703,12 @@ function App() {
               </div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {/* PERBAIKAN: Tambahkan (balances || {}) agar tidak crash jika null */}
                 {Object.entries(balances || {}).map(([symbol, amount]) => (
                   <div key={symbol} style={{ background: 'rgba(255,255,255,0.2)', padding: '5px 10px', borderRadius: '15px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}>
                     <span style={{ fontWeight: 'bold' }}>{symbol}</span>
                     <span>{parseFloat(amount).toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
                   </div>
                 ))}
-                {/* Loading state jika balances kosong */}
                 {(!balances || Object.keys(balances).length === 0) && <span style={{ fontSize: '12px', opacity: 0.7 }}>Loading portfolio...</span>}
               </div>
 
@@ -575,65 +805,177 @@ function App() {
             </div>
             {marketData ? (
               <div style={{ textAlign: 'center' }}>
-                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${(marketData.price ? parseFloat(marketData.price) : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</h1>
+                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${(marketData.price ? parseFloat(marketData.price) : 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})}</h1>
               </div>
             ) : <p style={{ textAlign: 'center', color: '#7f8c8d' }}>Scanner Idle...</p>}
           </div>
 
-          {/* SYSTEM TERMINAL (LIVE LOGS) */}
+          {/* SYSTEM TERMINAL (SEPARATED & COMBINED LIVE LOGS) */}
           <div style={cardStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-              <h3 style={{ margin: 0, color: '#34495e' }}>💻 Live Terminal</h3>
-              <span style={{ fontSize: '10px', color: '#7f8c8d' }}>Real-time Scanner & Bot Activity</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h3 style={{ margin: 0, color: '#34495e' }}>💻 Live Terminal (Log Terpisah & Gabungan)</h3>
+                <span style={{ fontSize: '11px', color: '#7f8c8d' }}>Pantau aktivitas Tokocrypto Hunter & Solana DEX secara terpisah atau berdampingan</span>
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                {[
+                  { id: 'SPLIT', label: '🪟 Split 2 Panel', bg: '#1e293b' },
+                  { id: 'TOKOCRYPTO', label: `🤖 Tokocrypto (${tokoLogs.length})`, bg: '#2563eb' },
+                  { id: 'SOLANA', label: `☀️ Solana (${solanaLogs.length})`, bg: '#7c3aed' },
+                  { id: 'ALL', label: `🌐 Semua (${systemLogs.length})`, bg: '#059669' },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setLogChannelView(tab.id)}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      backgroundColor: logChannelView === tab.id ? tab.bg : '#ecf0f1',
+                      color: logChannelView === tab.id ? '#ffffff' : '#2c3e50',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div style={{
-              background: '#000',
-              color: '#00ff00',
-              fontFamily: 'monospace',
-              fontSize: '12px',
-              padding: '15px',
-              borderRadius: '8px',
-              height: '200px',
-              overflowY: 'auto',
-              border: '1px solid #333'
-            }}>
-              {systemLogs.length === 0 ? (
-                <div style={{ color: '#555' }}>Checking system logs...</div>
-              ) : (
-                systemLogs.slice().reverse().map((log, index) => (
-                  <div key={index} style={{ marginBottom: '4px', borderBottom: '1px solid #111' }}>
-                    {log}
+
+            {logChannelView === 'SPLIT' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px' }}>
+                {/* PANEL KIRI: TOKOCRYPTO HUNTER */}
+                <div>
+                  <div style={{ background: '#1e3a8a', color: '#fff', padding: '6px 12px', borderTopLeftRadius: '8px', borderTopRightRadius: '8px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>🤖 Log Tokocrypto Hunter (CEX)</span>
+                    <span>{tokoLogs.length} baris</span>
                   </div>
-                ))
-              )}
-            </div>
+                  <div style={{
+                    background: '#090d16',
+                    color: '#38bdf8',
+                    fontFamily: 'monospace',
+                    fontSize: '11.5px',
+                    padding: '12px',
+                    borderBottomLeftRadius: '8px',
+                    borderBottomRightRadius: '8px',
+                    height: '220px',
+                    overflowY: 'auto',
+                    border: '1px solid #1e3a8a'
+                  }}>
+                    {tokoLogs.length === 0 ? (
+                      <div style={{ color: '#64748b' }}>Belum ada log aktivitas Tokocrypto Hunter...</div>
+                    ) : (
+                      tokoLogs.slice().reverse().map((log, index) => (
+                        <div key={index} style={{ marginBottom: '4px', borderBottom: '1px solid #111827', paddingBottom: '2px' }}>
+                          {log}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* PANEL KANAN: SOLANA DEX (TRADER v4 / SNIPER v3) */}
+                <div>
+                  <div style={{ background: '#581c87', color: '#fff', padding: '6px 12px', borderTopLeftRadius: '8px', borderTopRightRadius: '8px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>☀️ Log Solana DEX (Trader v4 / Sniper v3)</span>
+                    <span>{solanaLogs.length} baris</span>
+                  </div>
+                  <div style={{
+                    background: '#0f0718',
+                    color: '#c084fc',
+                    fontFamily: 'monospace',
+                    fontSize: '11.5px',
+                    padding: '12px',
+                    borderBottomLeftRadius: '8px',
+                    borderBottomRightRadius: '8px',
+                    height: '220px',
+                    overflowY: 'auto',
+                    border: '1px solid #581c87'
+                  }}>
+                    {solanaLogs.length === 0 ? (
+                      <div style={{ color: '#64748b' }}>Belum ada log aktivitas Solana DEX...</div>
+                    ) : (
+                      solanaLogs.slice().reverse().map((log, index) => (
+                        <div key={index} style={{ marginBottom: '4px', borderBottom: '1px solid #1f122b', paddingBottom: '2px' }}>
+                          {log}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{
+                background: '#000',
+                color: logChannelView === 'TOKOCRYPTO' ? '#38bdf8' : logChannelView === 'SOLANA' ? '#c084fc' : '#00ff00',
+                fontFamily: 'monospace',
+                fontSize: '12px',
+                padding: '15px',
+                borderRadius: '8px',
+                height: '220px',
+                overflowY: 'auto',
+                border: '1px solid #333'
+              }}>
+                {(() => {
+                  const activeLogs = logChannelView === 'TOKOCRYPTO' ? tokoLogs : logChannelView === 'SOLANA' ? solanaLogs : systemLogs
+                  if (activeLogs.length === 0) {
+                    return <div style={{ color: '#555' }}>Belum ada log untuk kategori ini...</div>
+                  }
+                  return activeLogs.slice().reverse().map((log, index) => (
+                    <div key={index} style={{ marginBottom: '4px', borderBottom: '1px solid #111' }}>
+                      {log}
+                    </div>
+                  ))
+                })()}
+              </div>
+            )}
           </div>
 
           <div style={cardStyle}>
-            <h3 style={{ color: '#34495e' }}>📜 Global History</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+              <h3 style={{ margin: 0, color: '#34495e' }}>📜 Global & Separated Trade History</h3>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[
+                  { id: 'ALL', label: '🌐 Semua Transaksi' },
+                  { id: 'Hunter', label: '🤖 Tokocrypto (Hunter)' },
+                  { id: 'Jupiter', label: '☀️ Solana (Jupiter)' },
+                ].map(f => (
+                  <button
+                    key={f.id}
+                    onClick={() => setHistoryFilter(f.id)}
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      backgroundColor: historyFilter === f.id ? '#2c3e50' : '#ecf0f1',
+                      color: historyFilter === f.id ? '#fff' : '#2c3e50',
+                    }}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '10px', fontSize: '13px', color: '#2c3e50' }}>
               <thead>
                 <tr style={{ textAlign: 'left', borderBottom: '2px solid #ecf0f1', color: '#7f8c8d' }}>
-                  <th style={{ padding: '8px' }}>Time</th><th>Source</th><th>Pair</th><th>Side</th><th>Amount</th><th>Info</th>
+                  <th style={{ padding: '8px' }}>Time</th><th>Source</th><th>Pair</th><th>Side</th><th>Amount (Real Coin/SOL/USDT)</th><th>PnL & Info</th>
                 </tr>
               </thead>
               <tbody>
-                {history.map((trade, idx) => (
+                {history.filter(t => historyFilter === 'ALL' || t.source === historyFilter).map((trade, idx) => (
                   <tr key={idx} style={{ borderBottom: '1px solid #ecf0f1' }}>
                     <td style={{ padding: '8px', color: '#7f8c8d' }}>{new Date(trade.created_at || trade.timestamp).toLocaleTimeString()}</td>
                     <td><span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', color: 'white', background: trade.source === 'Jupiter' ? 'linear-gradient(135deg, #8e44ad, #c0392b)' : '#2980b9' }}>{trade.source}</span></td>
                     <td style={{ fontWeight: 'bold' }}>{trade.symbol}</td>
-                    <td style={{ fontWeight: 'bold', color: trade.side === 'BUY' ? '#27ae60' : '#c0392b' }}>{trade.side}</td>
-                    <td>
-                      {trade.source === 'Jupiter' ? (
-                        trade.side === 'BUY'
-                          ? `${Number(trade.amount_out).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${trade.symbol.split('/')[0]} (dari ${Number(trade.amount_in).toFixed(4)} SOL)`
-                          : `${Number(trade.amount_out).toFixed(4)} SOL (dari ${Number(trade.amount_in).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${trade.symbol.split('/')[0]})`
-                      ) : (
-                        `$${trade.buy_price?.toFixed(2)}`
-                      )}
-                    </td>
-                    <td style={{ fontSize: '11px', color: '#95a5a6' }}>{trade.source === 'Jupiter' ? (trade.txid === 'UNKNOWN' ? '-' : <a href={`https://solscan.io/tx/${trade.txid}`} target="_blank" style={{ color: '#3498db' }}>View TX</a>) : (trade.profit_usdt ? `$${trade.profit_usdt}` : '-')}</td>
+                    <td>{renderTradeSide(trade)}</td>
+                    <td style={{ padding: '6px 4px' }}>{renderTradeAmount(trade)}</td>
+                    <td style={{ padding: '6px 4px', fontSize: '11px', color: '#95a5a6' }}>{renderTradeInfo(trade)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -653,4 +995,5 @@ function App() {
 
 const cardStyle = { borderRadius: '12px', padding: '20px', marginBottom: '20px', backgroundColor: '#ffffff', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }
 const btnActionStyle = { background: '#f39c12', color: 'white', border: 'none', padding: '8px 15px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }
+
 export default App
